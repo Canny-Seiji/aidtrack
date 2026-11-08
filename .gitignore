@@ -1,0 +1,10 @@
+# Generated objects and executable; keep sources and Makefile.
+*.o
+/aidtrack
+
+# Future transaction data should not expose household information.
+/data/
+
+# Editor temporary files
+*.swp
+*~
