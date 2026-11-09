@@ -92,7 +92,7 @@ section .data
          db 27,'[0m',0
     choice_prompt db 'Enter choice [0-8]: ',0
     id_prompt db 'Beneficiary ID [1-15 digits]: ',0
-    name_prompt db 'Full name [1-63 ASCII characters]: ',0
+    name_prompt db 'Full name [1-63 characters]: ',0
     qty_prompt db 'Quantity [1-9999]: ',0
     supply_prompt db LF,'1. Water containers',LF,'2. Relief packages',LF
                   db 'Supply type [1-2]: ',0
