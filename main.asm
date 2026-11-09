@@ -1,16 +1,15 @@
 ; ============================================================
-; AidTrack - Milestone 3: beneficiary registration
+; AidTrack - Milestone 4: supply inventory
 ; NASM 32-bit x86 Linux.
 ;
-; Option 1: register/replace ONE beneficiary in memory.
-; Option 8: exit.
-; Options 2..7: placeholders.
-; No files are saved yet. Use fictional beneficiary information.
+; Working options: 1 Register, 2 Add stock, 5 Inventory, 8 Exit.
+; Other options remain placeholders. Nothing is saved to files.
+; One beneficiary record; two independent stock counters.
 ; ============================================================
 
 BITS 32
 
-; Constants for Linux services, line endings, and field limits.
+; Linux services, line endings, and application limits.
 %define SYS_EXIT  1
 %define SYS_READ  3
 %define SYS_WRITE 4
@@ -21,9 +20,11 @@ BITS 32
 %define EINTR     -4
 %define ID_MAX    15
 %define NAME_MAX  63
+%define MAX_ADD   9999
+%define MAX_STOCK 999999
 
-; PRINT: prepare the address and length for the output procedure.
-; %1 = text address; %2 = length or a memory operand holding it.
+; Prepare output arguments and call the shared procedure.
+; %1 = address; %2 = length or a memory operand holding it.
 %macro PRINT 2
     mov ecx, %1
     mov edx, %2
@@ -47,6 +48,7 @@ section .data
          db '8. Exit', LF, LF
     menu_len equ $ - menu
 
+    ; Main-menu messages.
     prompt db 'Enter your choice [1-8]: '
     prompt_len equ $ - prompt
 
@@ -62,7 +64,7 @@ section .data
     input_ended db LF, 'Input ended or could not be read. Program stopped.', LF
     input_ended_len equ $ - input_ended
 
-    ; Registration prompts and feedback.
+    ; Beneficiary-registration messages.
     registration db LF, 'REGISTER BENEFICIARY', LF
                  db 'One record only: registering again replaces it.', LF
     registration_len equ $ - registration
@@ -91,26 +93,63 @@ section .data
     newline db LF
     newline_len equ $ - newline
 
+    ; NEW: inventory prompts and labels.
+    supply_menu db LF, 'ADD SUPPLY STOCK', LF
+                db '1. Water containers', LF
+                db '2. Relief packages', LF
+                db 'Supply type [1-2]: '
+    supply_menu_len equ $ - supply_menu
+
+    bad_supply db 'Invalid supply type. Enter 1 or 2.', LF
+    bad_supply_len equ $ - bad_supply
+
+    quantity_prompt db 'Quantity to add [1-9999]: '
+    quantity_prompt_len equ $ - quantity_prompt
+
+    bad_quantity db 'Invalid quantity. Enter a whole number from 1 to 9999.', LF
+    bad_quantity_len equ $ - bad_quantity
+
+    stock_limit db 'Stock limit is 999999 per supply. Enter a smaller quantity.', LF
+    stock_limit_len equ $ - stock_limit
+
+    stock_added db 'Stock added successfully.', LF
+    stock_added_len equ $ - stock_added
+
+    inventory_title db LF, 'CURRENT INVENTORY', LF
+    inventory_title_len equ $ - inventory_title
+
+    water_label db 'Water containers: '
+    water_label_len equ $ - water_label
+
+    relief_label db 'Relief packages: '
+    relief_label_len equ $ - relief_label
+
 section .bss
-    ; Shared scratch storage used while reading a complete line.
+    ; Shared input scratch space.
     input_byte resb 1
     choice_buffer resb 3
     line_overflow resb 1
 
-    ; Beneficiary record.
-    ; Extra bytes allow an optional CR and a terminating zero.
-    ; ID remains TEXT so that 000123 stays 000123.
+    ; One beneficiary record; preserve the ID as text.
     id_buffer resb ID_MAX + 2
     name_buffer resb NAME_MAX + 2
     id_len resd 1
     name_len resd 1
+
+    ; NEW: integer stock counters, initially zero on Linux.
+    water_stock resd 1
+    relief_stock resd 1
+
+    ; Quantity input and temporary decimal-output storage.
+    quantity_buffer resb 12
+    number_buffer resb 10
 
 section .text
     global _start
 
 ; ------------------------------------------------------------
 ; MAIN MENU
-; read_choice returns 1..8, 0 for invalid, or -1 for EOF/error.
+; read_choice returns 1..8, 0 invalid, or -1 EOF/read error.
 ; ------------------------------------------------------------
 _start:
     PRINT banner, banner_len
@@ -126,9 +165,12 @@ _start:
 
     cmp eax, 8
     je .exit
-
     cmp eax, 1
     je .register
+    cmp eax, 2
+    je .add_stock
+    cmp eax, 5
+    je .inventory
 
     PRINT pending, pending_len
     jmp .menu
@@ -137,6 +179,16 @@ _start:
     call register_beneficiary
     test eax, eax
     js .input_end
+    jmp .menu
+
+.add_stock:
+    call add_supply_stock
+    test eax, eax
+    js .input_end
+    jmp .menu
+
+.inventory:
+    call display_inventory
     jmp .menu
 
 .invalid:
@@ -155,8 +207,8 @@ _start:
 
 ; ------------------------------------------------------------
 ; REGISTER_BENEFICIARY
-; Collect and validate two fields, then display confirmation.
-; Returns EAX=0 on completion, -1 if input ends/fails.
+; Collect and display one ID/name pair.
+; Returns EAX=0 on completion, -1 on EOF/read error.
 ; Changes EAX/EBX/ECX/EDX/ESI and flags.
 ; ------------------------------------------------------------
 register_beneficiary:
@@ -177,7 +229,7 @@ register_beneficiary:
 
     mov [id_len], eax
 
-    ; Validate individual digits without converting the ID.
+    ; Validate digits without converting the ID to an integer.
     mov esi, id_buffer
     mov ecx, eax
 
@@ -186,7 +238,6 @@ register_beneficiary:
     sub al, '0'
     cmp al, 9
     ja .bad_id
-
     inc esi
     loop .check_id
 
@@ -205,12 +256,10 @@ register_beneficiary:
 
     mov [name_len], eax
 
-    ; Display the completed record using its actual byte lengths.
     PRINT registered, registered_len
     PRINT id_label, id_label_len
     PRINT id_buffer, [id_len]
     PRINT newline, newline_len
-
     PRINT name_label, name_label_len
     PRINT name_buffer, [name_len]
     PRINT newline, newline_len
@@ -232,9 +281,166 @@ register_beneficiary:
     ret
 
 ; ------------------------------------------------------------
+; NEW: ADD_SUPPLY_STOCK
+; Select a counter, validate the quantity, then update it.
+; Returns EAX=0 on success, -1 on EOF/read error.
+; Changes EAX/EBX/ECX/EDX/EDI and flags.
+; ------------------------------------------------------------
+add_supply_stock:
+.choose:
+    PRINT supply_menu, supply_menu_len
+    call read_choice
+
+    test eax, eax
+    js .ended
+    cmp eax, 1
+    je .water
+    cmp eax, 2
+    jne .bad_supply
+
+    mov edi, relief_stock
+    jmp .quantity
+
+.water:
+    mov edi, water_stock
+
+.quantity:
+    ; EDI holds the ADDRESS of the selected stock counter.
+    PRINT quantity_prompt, quantity_prompt_len
+    mov ecx, quantity_buffer
+    mov edx, 11
+    call read_line
+
+    cmp eax, -2
+    je .ended
+    test eax, eax
+    js .bad_quantity
+
+    call parse_quantity
+    test eax, eax
+    jz .bad_quantity
+
+    ; Calculate the proposed new stock before storing it.
+    ; Bounded operands keep this addition within 32-bit range.
+    add eax, [edi]
+    cmp eax, MAX_STOCK
+    ja .limit
+
+    mov [edi], eax            ; commit only after all checks pass
+
+    PRINT stock_added, stock_added_len
+    call display_inventory
+
+    xor eax, eax
+    ret
+
+.bad_supply:
+    PRINT bad_supply, bad_supply_len
+    jmp .choose
+
+.bad_quantity:
+    PRINT bad_quantity, bad_quantity_len
+    jmp .quantity
+
+.limit:
+    PRINT stock_limit, stock_limit_len
+    jmp .quantity
+
+.ended:
+    mov eax, -1
+    ret
+
+; ------------------------------------------------------------
+; NEW: DISPLAY_INVENTORY
+; Read and display both counters. Preserves all registers.
+; ------------------------------------------------------------
+display_inventory:
+    pushad
+
+    PRINT inventory_title, inventory_title_len
+    PRINT water_label, water_label_len
+    mov eax, [water_stock]
+    call print_uint
+    PRINT newline, newline_len
+
+    PRINT relief_label, relief_label_len
+    mov eax, [relief_stock]
+    call print_uint
+    PRINT newline, newline_len
+    PRINT newline, newline_len
+
+    popad
+    ret
+
+; ------------------------------------------------------------
+; NEW: PARSE_QUANTITY
+; Convert quantity_buffer from ASCII digits to an integer.
+; Returns EAX=1..MAX_ADD, or 0 for invalid/zero input.
+; Changes EAX/ECX/EDX and flags; leaves EDI unchanged.
+; Checking the limit after every digit prevents numeric overflow.
+; ------------------------------------------------------------
+parse_quantity:
+    xor eax, eax
+    xor ecx, ecx
+
+.digit:
+    movzx edx, byte [quantity_buffer + ecx]
+    test edx, edx
+    jz .done
+
+    sub edx, '0'
+    cmp edx, 9
+    ja .invalid
+
+    imul eax, eax, 10
+    add eax, edx
+    cmp eax, MAX_ADD
+    ja .invalid
+
+    inc ecx
+    jmp .digit
+
+.invalid:
+    xor eax, eax
+
+.done:
+    ret
+
+; ------------------------------------------------------------
+; NEW: PRINT_UINT
+; Input: EAX=unsigned integer. Preserves all registers.
+; Divide repeatedly by 10; each remainder supplies one digit.
+; Build digits right to left, then display the completed number.
+; ------------------------------------------------------------
+print_uint:
+    pushad
+
+    mov edi, number_buffer + 10
+    mov ebx, 10
+    xor ecx, ecx
+
+.digit:
+    xor edx, edx
+    div ebx
+    add dl, '0'
+    dec edi
+    mov [edi], dl
+    inc ecx
+
+    test eax, eax
+    jnz .digit
+
+    mov edx, ecx
+    mov ecx, edi
+    call write_stdout
+
+    popad
+    ret
+
+; ------------------------------------------------------------
 ; READ_CHOICE
-; Reuses the same line reader as beneficiary registration.
-; Returns 1..8, 0 for invalid, or -1 for EOF/error.
+; Reuse read_line and convert one menu digit.
+; Returns 1..8, 0 invalid, or -1 EOF/read error.
 ; Changes EAX/ECX/EDX and flags.
 ; ------------------------------------------------------------
 read_choice:
@@ -264,18 +470,13 @@ read_choice:
     ret
 
 ; ------------------------------------------------------------
-; READ_LINE: shared input procedure.
-; Input: ECX=buffer, EDX=maximum stored bytes.
-; The caller must reserve EDX+1 bytes for the terminating zero.
-;
-; Output:
-;   EAX >= 0 : valid line length
-;   EAX = -1 : invalid line
-;   EAX = -2 : EOF/read error
-;
+; READ_LINE
+; Input: ECX=buffer, EDX=max stored bytes; reserve EDX+1 bytes.
+; Output: EAX=length, -1 invalid line, -2 EOF/read error.
 ; Preserves all other registers; flags are not preserved.
-; Reads the complete line, removes LF/trailing CR, and adds zero.
-; Rejects oversized, blank-only, and nonprintable ASCII input.
+;
+; Consumes the complete line, removes LF/trailing CR, adds zero.
+; Rejects overflow, blank-only input, and nonprintable ASCII.
 ; ------------------------------------------------------------
 read_line:
     push ebx
@@ -285,9 +486,9 @@ read_line:
     push edi
     push ebp
 
-    mov esi, ecx              ; destination address
-    mov edi, edx              ; maximum stored bytes
-    xor ebp, ebp              ; number of bytes stored
+    mov esi, ecx
+    mov edi, edx
+    xor ebp, ebp
     mov byte [line_overflow], 0
 
 .read:
@@ -308,13 +509,11 @@ read_line:
 
     cmp ebp, edi
     jae .overflow
-
     mov [esi + ebp], al
     inc ebp
     jmp .read
 
 .overflow:
-    ; Keep consuming the line without writing past the buffer.
     mov byte [line_overflow], 1
     jmp .read
 
@@ -330,8 +529,8 @@ read_line:
     cmp byte [line_overflow], 0
     jne .invalid
 
-    xor ecx, ecx              ; character index
-    xor edx, edx              ; non-space character count
+    xor ecx, ecx
+    xor edx, edx
 
 .scan:
     cmp ecx, ebp
@@ -354,7 +553,6 @@ read_line:
 .checked:
     test edx, edx
     jz .invalid
-
     mov eax, ebp
     jmp .return
 
@@ -376,19 +574,15 @@ read_line:
     pop ebx
     ret
 
-; ------------------------------------------------------------
-; WRITE_STDOUT
-; Input: ECX=text address, EDX=byte length.
-; Changes EAX/EBX.
-; Failed/partial write handling remains deferred.
-; ------------------------------------------------------------
+; Shared output: ECX=text address, EDX=byte length.
+; Changes EAX/EBX. Failed/partial write handling remains deferred.
 write_stdout:
     mov eax, SYS_WRITE
     mov ebx, STDOUT
     int 0x80
     ret
 
-; EBX supplies the exit status. This procedure never returns.
+; EBX supplies the exit status; this procedure never returns.
 exit_program:
     mov eax, SYS_EXIT
     int 0x80
